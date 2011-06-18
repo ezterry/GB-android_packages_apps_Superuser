@@ -1,8 +1,8 @@
 package com.noshufou.android.su; 
 
 import java.io.BufferedReader;
+import java.io.DataInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.List;
 
@@ -12,7 +12,7 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.res.Resources;
@@ -22,6 +22,7 @@ import android.os.Bundle;
 import android.preference.PreferenceManager;
 import android.util.Log;
 import android.widget.TabHost;
+import android.widget.Toast;
 
 public class Su extends TabActivity {
     private static final String TAG = "Su";
@@ -89,7 +90,7 @@ public class Su extends TabActivity {
 		}
 		Log.d(TAG, "First run for version " + versionCode);
 		
-		String suVer = getSuVersion(this);
+		String suVer = getSuVersion();
 		Log.d(TAG, "su version: " + suVer);
 		new Updater(this, suVer).doUpdate();
 		
@@ -155,51 +156,106 @@ public class Su extends TabActivity {
 	    }
     }
 
-    public static String getSuVersion(Context context)
-    {
-    	Process process = null;
-    	try {
-    		process = Runtime.getRuntime().exec("su -v");
-    		InputStream processInputStream = process.getInputStream();
-    		BufferedReader stdInput = new BufferedReader(new InputStreamReader(processInputStream));
-    		try {
-    			int counter = 0;
-    			while(counter < 20) {
-	   				Thread.sleep(50);
-	    			if (stdInput.ready()) {
-	    				String suVersion = stdInput.readLine();
-	    				return suVersion;
-	    			}
-	    			counter++;
-    			}
-    			return " " + context.getString(R.string.su_original);
-    		} finally {
-    			stdInput.close();
-    		}
-    	} catch (IOException e) {
-    		Log.e(TAG, "Call to su failed. Perhaps the wrong version of su is present", e);
-    		return " " + context.getString(R.string.su_original);
-    	} catch (InterruptedException e) {
-    		Log.e(TAG, "Call to su failed.", e);
-    		return " ...";
-		}
+    public static String getSuVersion() {
+        Process process = null;
+
+        try {
+            process = Runtime.getRuntime().exec("su -v");
+            BufferedReader is = new BufferedReader(new InputStreamReader(
+                    new DataInputStream(process.getInputStream())), 64);
+
+            int i = 0;
+            while (i < 150 && !is.ready()) {
+                    Thread.sleep(5);
+                i++;
+            }
+
+            if (is.ready()) {
+                return is.readLine();
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Problems reading current version.", e);
+            return null;
+        } catch (InterruptedException e) {
+            Log.w(TAG, "Sleep timer got interrupted...");
+        } finally {
+            if (process != null) {
+                process.destroy();
+            }
+        }
+
+        return null;
     }
 	
-	public class CheckForMaliciousApps extends AsyncTask<String, Integer, String> {
+    public static int getSuVersionCode() {
+        Process process = null;
+
+        try {
+            process = Runtime.getRuntime().exec("su -V");
+            BufferedReader is = new BufferedReader(new InputStreamReader(
+                    new DataInputStream(process.getInputStream())), 64);
+
+            int i = 0;
+            while (i < 150 && !is.ready()) {
+                    Thread.sleep(5);
+                i++;
+            }
+
+            if (is.ready()) {
+                return Integer.parseInt(is.readLine());
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Problems reading current version.", e);
+            return 0;
+        } catch (InterruptedException e) {
+            Log.w(TAG, "Sleep timer got interrupted...");
+        } catch (NumberFormatException e) {
+            return 0;
+        } finally {
+            if (process != null) {
+                process.destroy();
+            }
+        }
+
+        return 0;
+    }
+
+    public class CheckForMaliciousApps extends AsyncTask<String, Integer, String> {
 
         @Override
         protected String doInBackground(String... params) {
             PackageManager pm = mContext.getPackageManager();
-            List<ApplicationInfo> apps = pm.getInstalledApplications(0);
-            for (int i = 0; i < apps.size(); i++) {
-                ApplicationInfo app = apps.get(i);
-                if (!app.packageName.equals(mContext.getPackageName()) &&
-                        pm.checkPermission("com.noshufou.android.su.RESPOND", app.packageName) ==
-                            PackageManager.PERMISSION_GRANTED && 
-                            !mMaliciousAppPackage.equals(app.packageName)) {
-                    mMaliciousAppPackage = app.packageName;
-                    return app.packageName;
+            try {
+                // Check for packages implicitly granted respond permissions
+                // No app shall be allowed to share a UID with Superuser
+                String[] pkgsWithSuUID = pm.getPackagesForUid(
+                        pm.getApplicationInfo(mContext.getPackageName(), 0).uid);
+                for (String pkg : pkgsWithSuUID) {
+                    if (!pkg.equals(getPackageName()) && !pkg.equals(mMaliciousAppPackage)) {
+                        mMaliciousAppPackage = pkg;
+                        return pkg;
+                    }
                 }
+
+                // Check for packages explicitly granted respond permissions
+                List<PackageInfo> pkgs = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS);
+                for (PackageInfo pkg : pkgs) {
+                    if (pkg.requestedPermissions != null) {
+                        for (String s : pkg.requestedPermissions) {
+                            if (!pkg.applicationInfo.packageName.equals(getPackageName()) &&
+                                    s.equals("com.noshufou.android.su.RESPOND") &&
+                                    pm.checkPermission("com.noshufou.android.su.RESPOND",
+                                            pkg.applicationInfo.packageName) ==
+                                                PackageManager.PERMISSION_GRANTED) {
+                                mMaliciousAppPackage = pkg.applicationInfo.packageName;
+                                return pkg.applicationInfo.packageName;
+                            }
+                        }
+                    }
+                }
+            } catch (NameNotFoundException e) {
+                // This won't happen
+                Log.e(TAG, "You divided by zero...", e);
             }
             return null;
         }
